@@ -12,11 +12,13 @@ SECTION_ORDER = [
 ]
 
 def normalize(s: str) -> str:
-    s = s.replace("’","'").replace("–","-").replace("—","-")
-    s = re.sub(r"\s+"," ", s.strip())
+    # Used only for heading detection (not for output)
+    s = s.replace("’", "'").replace("–", "-").replace("—", "-")
+    s = re.sub(r"\s+", " ", s.strip())
     return s.lower()
 
 def extract_pages(pdf_bytes: bytes) -> list[str]:
+    """Extract text from a digital-text PDF. Raises if nothing selectable (i.e., a scan)."""
     pages = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         if not pdf.pages:
@@ -32,9 +34,15 @@ def extract_pages(pdf_bytes: bytes) -> list[str]:
     return pages
 
 def find_section_spans(full_text: str):
+    """
+    Locate the three target sections by their headings and return absolute char spans
+    from each heading to the next heading. Output text itself remains 100% verbatim.
+    """
     lines = full_text.splitlines(keepends=True)
     L = [(i, raw, normalize(raw)) for i, raw in enumerate(lines)]
-    enum = r"(?:\d+\s*[.)]\s*)?"  # allow "1.", "1)" etc.
+
+    # allow "1.", "1)", "1 .", etc., before headings
+    enum = r"(?:\d+\s*[.)]\s*)?"
 
     H_TODAY = re.compile(rf"^{enum}today'?s\s+must-?know\s+news\s*$")
     H_AMER  = re.compile(rf"^{enum}americas\s*$")
@@ -44,7 +52,7 @@ def find_section_spans(full_text: str):
         s = raw.strip()
         return bool(s) and len(s) <= 80 and not s.endswith((".", "!", "?", ";", ","))
 
-    # collect heading indices
+    # gather possible heading lines
     target_idx = {}
     all_heads = set()
     for i, raw, norm in L:
@@ -56,6 +64,7 @@ def find_section_spans(full_text: str):
             target_idx["greater_china"] = i
         if looks_like_heading(raw):
             all_heads.add(i)
+
     all_heads_sorted = sorted(all_heads)
 
     def span_from(start_line: int):
@@ -66,7 +75,7 @@ def find_section_spans(full_text: str):
                 break
         start_abs = sum(len(lines[k]) for k in range(start_line))
         end_abs   = sum(len(lines[k]) for k in range(end_line))
-        heading_line = lines[start_line]
+        heading_line = lines[start_line]  # for reference (not used further)
         return start_abs, end_abs, heading_line
 
     spans = {}
@@ -76,28 +85,38 @@ def find_section_spans(full_text: str):
     return spans
 
 def split_for_platform(s: str, limit: int = 1800):
-    """Split into chunks for Discord/webhook safety; we don't change words.\"""
+    """Split long messages without altering words; prefer blank-line or line breaks."""
     if len(s) <= limit:
         return [s]
-    parts=[]; remain=s
-    while len(remain)>limit:
+    parts = []
+    remain = s
+    while len(remain) > limit:
         window = remain[:limit]
         cut = window.rfind("\n\n")
-        if cut < 0: cut = window.rfind("\n")
-        if cut < 0: cut = limit
+        if cut < 0:
+            cut = window.rfind("\n")
+        if cut < 0:
+            cut = limit
         parts.append(remain[:cut])
         remain = remain[cut:]
-        if remain.startswith("\n"): remain = remain[1:]
-    if remain: parts.append(remain)
+        if remain.startswith("\n"):
+            remain = remain[1:]
+    if remain:
+        parts.append(remain)
     return parts
 
+# ---------- UI ----------
 st.title("PDF → Sections (verbatim)")
 
-left, right = st.columns([2,1], gap="large")
+left, right = st.columns([2, 1], gap="large")
 with right:
     st.markdown("**Options**")
     monospace = st.checkbox("Show sections in monospace (preserve alignment)", value=False)
-    webhook = st.text_input("Discord Webhook URL (optional)", type="password", help="If set, the app can post the output to Discord via webhook.")
+    webhook = st.text_input(
+        "Discord Webhook URL (optional)",
+        type="password",
+        help="If set, the app can post the output to a Discord channel via webhook."
+    )
     st.caption("WhatsApp: we use 'Click-to-Chat' links. Auto-send needs WhatsApp Business API (paid/approval).")
 
 with left:
@@ -106,7 +125,7 @@ with left:
         try:
             pdf_bytes = file.read()
             pages = extract_pages(pdf_bytes)
-            full = "".join(pages)  # exact text
+            full = "".join(pages)  # EXACT text (no edits)
         except ValueError as e:
             st.error(str(e))
             st.stop()
@@ -122,8 +141,8 @@ with left:
         for key, label, icon in SECTION_ORDER:
             if key not in spans:
                 continue
-            start_abs, end_abs, heading_line = spans[key]
-            section_raw = full[start_abs:end_abs]  # EXACT original section
+            start_abs, end_abs, _ = spans[key]
+            section_raw = full[start_abs:end_abs]  # EXACT original section text
             message = f"{icon}\n{section_raw}".rstrip()
 
             st.subheader(f"{icon} {label}")
@@ -132,17 +151,16 @@ with left:
             else:
                 st.text_area(" ", value=message, height=220, label_visibility="collapsed")
 
-            # Download button
+            # Download
             st.download_button(
                 label=f"Download {label}.txt",
                 data=message.encode("utf-8"),
-                file_name=f"{label.replace(' ','_')}.txt",
+                file_name=f"{label.replace(' ', '_')}.txt",
                 mime="text/plain",
                 use_container_width=True
             )
 
             # WhatsApp "Click-to-Chat"
-            import urllib.parse
             wa_url = "https://wa.me/?text=" + urllib.parse.quote(message)
             st.markdown(f"[Share to WhatsApp (prefilled)]({wa_url})")
 
